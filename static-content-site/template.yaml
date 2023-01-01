@@ -10,7 +10,7 @@ Description: >
   The S3 bucket is *not* configured for Static website hosting.
 
   Example CLI command to run this template:
-    sam deploy --parameter-overrides "TargetHostedZoneId=Z00129129SA3JENA66ILI"
+    sam deploy --parameter-overrides "TargetHostedZoneId=<MyHostedZoneID>"
 
   Example of calling this template from Github Actions. The Bitbucket Pipelines pipe is very similar.
   - name: Deploy to AWS CloudFormation
