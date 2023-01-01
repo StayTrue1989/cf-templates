@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  cloudfront-with-s3-origin-template.yaml
+
+  S3 Origin with CloudFront using OriginAccessControl.
+
+  SAM Template for a public facing url to host content files.
+  The domain name URL will be a randomly assigned value from AWS.
+  The S3 bucket is *not* configured for Static website hosting.
+
+  Example CLI command to run this template:
+    sam deploy --parameter-overrides "TargetHostedZoneId=Z00129129SA3JENA66ILI"
+
+  Example of calling this template from Github Actions. The Bitbucket Pipelines pipe is very similar.
+  - name: Deploy to AWS CloudFormation
+  uses: aws-actions/aws-cloudformation-github-deploy@v1
+  with:
+    name: MyStackName
+    template: cloudfront-with-s3-origin-template.yaml
+    parameter-overrides: "MyParam1=myValue,TargetHostedZoneId=${{ secrets.MY_SECRET_VALUE }}"
+
+
+Parameters:
+
+  # S3OriginBucketNameParam:
+  #   Description: Name of the bucket
+  #   Type: String
+  #   Default: static-content-website
+
+  TargetHostedZoneId:
+    Description: ID of the Route53 hosted zone where the DNS records will be created.
+    Type: String
+
+  # CloudFrontAlias:
+  #   Description: Name of the customer alias to add to the CloudFront distribution.
+  #   Type: String
+
+
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 5
+
+Resources:
+  S3Origin:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join
+              - "-"
+              - - !Ref "AWS::AccountId"
+                - !Ref AWS::Region
+                - !Ref AWS::StackName
+      PublicAccessBlockConfiguration: # Block public access to the bucket
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3OriginBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref S3Origin
+        PolicyDocument:
+          Statement:
+            Sid: AllowCloudFrontServicePrincipalGetObject
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Join
+                - ""
+                - - "arn:aws:s3:::"
+                  - !Ref S3Origin
+                  - /*
+            #Resource: !Sub arn:aws:s3:::${S3Bucket}/*
+            Condition:
+              StringEquals:
+                # Join below creates a string with the form:
+                # AWS:SourceARN: "AWS:SourceArn": "arn:aws:cloudfront::{account-id}:distribution/{CloudFrontDistributionId}"
+                AWS:SourceARN: !Join
+                - ""
+                - - "arn:aws:cloudfront::"
+                  - !Ref "AWS::AccountId"
+                  - ":distribution/"
+                  #- !Ref CloudFrontDistribution
+                  - !GetAtt CloudFrontDistribution.Id
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        # ViewerCertificate:
+        #   #AcmCertificateArn: !Ref MyCertificate
+        #   SslSupportMethod: sni-only
+        # Aliases:
+        #   - example.com
+        #   - www.example.com
+        HttpVersion: http2and3
+        DefaultCacheBehavior:
+          ViewerProtocolPolicy: redirect-to-https # Use over https-only, which will return a 403 (Forbidden) if the viewer sends an HTTP request.
+          TargetOriginId: my-origin-id
+          DefaultTTL: 0
+          MinTTL: 0
+          MaxTTL: 0
+          ForwardedValues:
+            QueryString: false
+        Origins:
+          - DomainName: !Join
+              - ""
+              - - !Ref S3Origin
+                - ".s3.amazonaws.com"
+            Id: my-origin-id
+            OriginAccessControlId: !Ref S3OriginOACConfig # Referencing the OriginAccessControl Resource | Can only be used on S3 buckets that are NOT configured for static site hosting.
+            S3OriginConfig: # Empty S3OriginConfig, overrides default one created by CloudFormation. Required to use newer OriginAccessControl feature above.
+              OriginAccessIdentity: ""
+        DefaultRootObject: production/index.html #Should point to production/sitemap.js
+
+  S3OriginOACConfig:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties: 
+      OriginAccessControlConfig: 
+        #Name: S3Origin-OAC
+        Name: !Join
+          - "-"
+          - - "OAC"
+            - !Ref S3Origin
+        Description: An optional description for the origin access control
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+Outputs:
+  #S3 bucket name
+  S3OriginBucketName:
+    Description: S3 bucket name
+    Value: !Ref S3Origin
+    #Export:
+    #  Name: !Sub ${AWS::StackName}-S3BucketName
+  #Cloudfront Distribution ID
+  CloudFrontDistributionId:
+    Description: Cloudfront Distribution ID
+    Value: !Ref CloudFrontDistribution
+    #Export:
+    #  Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
+  #Cloudfront Distribution Domain Name
+  CloudFrontDistributionDomainName:
+    Description: Cloudfront Distribution Domain Name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    #Export:
+    #  Name: !Sub ${AWS::StackName}-CloudFrontDistributionDomainName 
