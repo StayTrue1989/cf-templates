@@ -3,7 +3,8 @@
 
 ### Getting Started
 
-* Rename samconfig_template.toml to template.toml
+
+* Rename samconfig_template.toml to samconfig.toml
 * Update the s3_bucket parameter from the template.toml file (Substitute the S3 bucket you want to use for saving state data)
 
 ```
