@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  cloudfront-with-s3-origin-template.yaml
+
+  S3 Origin with CloudFront using OriginAccessControl.
+
+  SAM Template for a public facing url to host content files.
+  The domain name URL will be a randomly assigned value from AWS.
+  The S3 bucket is *not* configured for Static website hosting.
+
+  Example CLI command to run this template:
+    sam deploy --parameter-overrides "TargetHostedZoneId=<MyHostedZoneID>"
+
+  Example of calling this template from Github Actions. The Bitbucket Pipelines pipe is very similar.
+  - name: Deploy to AWS CloudFormation
+  uses: aws-actions/aws-cloudformation-github-deploy@v1
+  with:
+    name: MyStackName
+    template: cloudfront-with-s3-origin-template.yaml
+    parameter-overrides: "MyParam1=myValue,TargetHostedZoneId=${{ secrets.MY_SECRET_VALUE }}"
+
+Parameters:
+  ACMCertificateDomainName:
+    Description: Domain name registered with ACM.
+    Type: String
+    Default: abcd.traviseno.com
+
+  #ACMCertificateSubjectAlternativeName:
+  DevACMCertificateDomainName:
+    Description: Subject Alternative Name registered with above Domain name.
+    Type: String
+    Default: dev.abcd.traviseno.com
+
+  ManagedCachePolicyCachingOptimized:
+    Description: AWS Managed caching policy "CachingOptimized". Recommended for S3 origins.
+    Type: String
+    Default: 658327ea-f89d-4fab-a63d-7e88639e58f6
+    # https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html#managed-cache-policies-list
+
+  # S3OriginBucketNameParam:
+  #   Description: Name of the bucket
+  #   Type: String
+  #   Default: static-content-website
+
+  # TargetHostedZoneId:
+  #   Description: ID of the Route53 hosted zone where the DNS records will be created.
+  #   Type: String
+
+  # CloudFrontAlias:
+  #   Description: Name of the customer alias to add to the CloudFront distribution.
+  #   Type: String
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 5
+
+Resources:
+  DNSDomainValidationRecord:
+    Type: AWS::CertificateManager::Certificate
+    #DeletionPolicy: Retain
+    #UpdateReplacePolicy: Delete
+    Properties:
+      #CertificateAuthorityArn: String
+      #CertificateTransparencyLoggingPreference: String
+      DomainName: !Ref ACMCertificateDomainName
+      DomainValidationOptions:
+        - DomainName: !Ref ACMCertificateDomainName
+          ValidationDomain: !Ref ACMCertificateDomainName
+      # SubjectAlternativeNames:
+      #   - !Ref ACMCertificateSubjectAlternativeName
+      #Tags:
+      #  - Tag
+      ValidationMethod: DNS
+
+  DevDNSDomainValidationRecord:
+    Type: AWS::CertificateManager::Certificate
+    #DeletionPolicy: Retain
+    #UpdateReplacePolicy: Delete
+    Properties:
+      #CertificateAuthorityArn: String
+      #CertificateTransparencyLoggingPreference: String
+      DomainName: !Ref DevACMCertificateDomainName
+      DomainValidationOptions:
+        - DomainName: !Ref DevACMCertificateDomainName
+          ValidationDomain: !Ref DevACMCertificateDomainName
+      #Tags:
+      #  - Tag
+      ValidationMethod: DNS
+
+  S3LoggingBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-dbdo-${AWS::StackName}-logs"
+      AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration: # Block public access to the bucket
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3Origin:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-dbdo-${AWS::StackName}"
+      PublicAccessBlockConfiguration: # Block public access to the bucket
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LoggingBucket
+        LogFilePrefix: s3-origin-logs/
+
+  S3OriginBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Origin
+      PolicyDocument:
+        Statement:
+          Sid: AllowCloudFrontServicePrincipalGetObject
+          Effect: Allow
+          Principal:
+            Service: cloudfront.amazonaws.com
+          Action: s3:GetObject
+          Resource:
+            - !Sub "arn:aws:s3:::${S3Origin}/*"
+          Condition:
+            StringEquals:
+              AWS:SourceARN:
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${DevCloudFrontDistribution}"
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        ViewerCertificate:
+          AcmCertificateArn: !Ref DNSDomainValidationRecord
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021 # On the CloudFront console, this setting is called Security Policy
+        Aliases:
+          - !Ref ACMCertificateDomainName
+        HttpVersion: http2and3
+        DefaultCacheBehavior:
+          #DefaultTTL: 0
+          #MinTTL: 0
+          #MaxTTL: 0
+          CachePolicyId: !Ref ManagedCachePolicyCachingOptimized
+          TargetOriginId: s3-origin-id
+          ViewerProtocolPolicy: redirect-to-https # Use over https-only, which will return a 403 (Forbidden) if the viewer sends an HTTP request.
+        Origins:
+          - DomainName: !Sub "${S3Origin}.s3.amazonaws.com"
+            Id: s3-origin-id
+            OriginAccessControlId: !Ref S3OriginOACConfig # Referencing the OriginAccessControl Resource | Can only be used on S3 buckets that are NOT configured for static site hosting.
+            S3OriginConfig: # Empty S3OriginConfig, overrides default one created by CloudFormation. Required to use newer OriginAccessControl feature above.
+              OriginAccessIdentity: ""
+            OriginPath: /prod
+        DefaultRootObject: index.html
+        #DefaultRootObject: production/index.html #Should point to production/sitemap.js
+        Logging:
+          Bucket: !Sub "${S3LoggingBucket}.s3.amazonaws.com"
+          IncludeCookies: False
+          Prefix: cloudfront-distribution-logs/
+
+  DevCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        ViewerCertificate:
+          AcmCertificateArn: !Ref DevDNSDomainValidationRecord
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021 # On the CloudFront console, this setting is called Security Policy
+        Aliases:
+          - !Ref DevACMCertificateDomainName
+        HttpVersion: http2and3
+        DefaultCacheBehavior:
+          #DefaultTTL: 0
+          #MinTTL: 0
+          #MaxTTL: 0
+          CachePolicyId: !Ref ManagedCachePolicyCachingOptimized
+          TargetOriginId: s3-origin-id
+          ViewerProtocolPolicy: redirect-to-https # Use over https-only, which will return a 403 (Forbidden) if the viewer sends an HTTP request.
+        Origins:
+          - DomainName: !Sub "${S3Origin}.s3.amazonaws.com"
+            Id: s3-origin-id
+            OriginAccessControlId: !Ref S3OriginOACConfig # Referencing the OriginAccessControl Resource | Can only be used on S3 buckets that are NOT configured for static site hosting.
+            S3OriginConfig: # Empty S3OriginConfig, overrides default one created by CloudFormation. Required to use newer OriginAccessControl feature above.
+              OriginAccessIdentity: ""
+            OriginPath: /dev
+        DefaultRootObject: index.html
+        #DefaultRootObject: production/index.html #Should point to production/sitemap.js
+        Logging:
+          Bucket: !Sub "${S3LoggingBucket}.s3.amazonaws.com"
+          IncludeCookies: False
+          Prefix: dev-cloudfront-distribution-logs/
+
+  S3OriginOACConfig:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${S3Origin}-OAC"
+        Description: An optional description for the origin access control
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+# Outputs:
+#   #S3 bucket name
+#   S3OriginBucketName:
+#     Description: S3 bucket name
+#     Value: !Ref S3Origin
+#     #Export:
+#     #  Name: !Sub ${AWS::StackName}-S3BucketName
+#Cloudfront Distribution ID
+# CloudFrontDistributionId:
+#   Description: Cloudfront Distribution ID
+#   Value: !Ref CloudFrontDistribution
+#Export:
+#  Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
+#   #Cloudfront Distribution Domain Name
+#   CloudFrontDistributionDomainName:
+#     Description: Cloudfront Distribution Domain Name
+#     Value: !GetAtt CloudFrontDistribution.DomainName
+#     #Export:
+#     #  Name: !Sub ${AWS::StackName}-CloudFrontDistributionDomainName
